@@ -47,25 +47,48 @@ source(
 
 create_cbp_requests <-
   function(
-    fields,
+    naics_year, ## What year is in the NAICS variable name
     state_fips, ## What state do we want data from
-    co_fips,
+    co_fips, ## Which county
     year ## What year do we want data from
   ) {
+    ## Minimum number of variables that is common across 2010 - 2002
+    cbp_common_vars <-
+      c(
+        "COUNTY",
+        "ST",
+        "GEO_TTL",
+        "YEAR",
+        "PAYANN",
+        "EMP",
+        "EMPSZES_TTL",
+        "ESTAB"
+      )
+
+    ## Coerce these variables to a string that API likes
+    fields <-
+      paste(cbp_common_vars, collapse = ",")
+
+    ## Add flexible NAICS error term that changes depending on year of query call
+    fields_fin <-
+      glue("{fields},NAICS{naics_year},NAICS{naics_year}_TTL")
+
+    ## This url keeps census secrets
     base_url <-
       glue("https://api.census.gov/data/{year}/cbp")
 
+    ## This shapes the query | 1 call for each hot-humid county
     api_query <-
       request(base_url) %>%
       req_url_query(
-        get = fields,
+        get = fields_fin,
         `for` = glue("county:{co_fips}"),
         `in` = glue("state:{state_fips}"),
-        key = census_api_key
+        key = my_census_key
       ) %>%
-      req_throttle(rate = 5) %>%
+      req_throttle(rate = 5) %>% ## Trying to be a good API citizen
       req_retry(max_tries = 3, backoff = ~10) %>%
-      req_timeout(30)
+      req_timeout(60)
 
     return(api_query)
   }
@@ -75,48 +98,8 @@ create_cbp_requests <-
 # Load raw url query inputs ----
 ## ---------------------------------------------------------------------------=
 
-## So, we want to query the census API and return CBP data for the
-## counties in hd_md_reg. These guys serve as raw inputs into the
-## httr2 function
-
-## The variables to be included in the eventual Co. buisness pattern DF
-cbp_09_10_vars <-
-  c(
-    "COUNTY",
-    "CSA",
-    "EMP",
-    "EMP_F",
-    "EMP_N",
-    "EMP_N_F",
-    "EMPSZES",
-    "EMPSZES_TTL",
-    "ESTAB",
-    "ESTAB_F",
-    "FOOTID_GEO",
-    "FOOTID_NAICS",
-    "GEO_ID",
-    "GEO_TTL",
-    "GEOTYPE",
-    "LFO",
-    "LFO_TTL",
-    "MD",
-    "MSA",
-    "NAICS2007",
-    "NAICS2007_TTL",
-    "PAYANN",
-    "PAYANN_F",
-    "PAYANN_N",
-    "PAYANN_N_F",
-    "PAYQTR1",
-    "PAYQTR1_F",
-    "PAYQTR1_N",
-    "PAYQTR1_N_F",
-    "ST",
-    "YEAR"
-  )
-
-fields_09_10 <-
-  paste(cbp_09_10_vars, collapse = ",")
+## So, we want to automate our calls to census cbp api. We can do this by
+## putting function arguments into a tibble and using pmap in the call
 
 study_years <-
   c(paste(2002:2010))
@@ -128,40 +111,157 @@ hd_md_split <-
 
 api_arguments <-
   map(hd_md_split, ~ expand_grid(study_years, .x)) %>%
-  list_rbind()
+  list_rbind() %>%
+  mutate(
+    naics_era = case_when(
+      study_years %in% c('2009', '2010', '2008') ~ '2007',
+      study_years == '2002' ~ '1997',
+      TRUE ~ '2002'
+    )
+  )
 
-
-api_calls_09_10 <-
-  filter(api_arguments, study_years %in% c('2009', '2010'))
 
 ## ---------------------------------------------------------------------------=
 # Build API Calls -----
 ## ---------------------------------------------------------------------------=
 
-cbp_api_09_10_calls <- pmap(
-  api_calls_09_10,
-  function(study_years, state_fips, county_fips) {
-    create_cbp_requests(
-      fields = fields_09_10,
-      year = study_years,
-      state_fips = state_fips,
-      co_fips = county_fips
+tictoc::tic()
+
+pwalk(
+  api_args_unprocessed,
+  function(study_years, state_fips, county_fips, naics_era) {
+    cli::cli_alert(glue(
+      'Creating Query for {state_fips}{county_fips} in {study_years}'
+    ))
+
+    Sys.sleep(0.5)
+    api_query <-
+      create_cbp_requests(
+        naics_year = naics_era,
+        year = study_years,
+        state_fips = state_fips,
+        co_fips = county_fips
+      )
+
+    cli::cli_alert('Peforming Query --> Coercing to dataframe')
+
+    cbp_dat <-
+      api_query %>%
+      req_perform() %>%
+      resp_body_json(simplifyVector = TRUE) %>%
+      as.data.frame(stringsAsFactors = FALSE)
+
+    cli::cli_alert("Performing basic cleaning pre export")
+
+    cbp_cl <-
+      cbp_dat %>%
+      janitor::row_to_names(row_number = 1) %>%
+      mutate(
+        naics = str_remove(.data[[glue("NAICS{naics_era}")]], "\\d{4}$"),
+        naics_ttl = str_remove(
+          .data[[glue("NAICS{naics_era}_TTL")]],
+          "\\d{4}$"
+        ),
+        naics_yr = naics_era
+      )
+
+    cli::cli_alert(glue(
+      'Writing cleaned file for {state_fips}{county_fips} in {study_years}'
+    ))
+
+    write_csv(
+      cbp_cl,
+      glue('data/cbp_dat_{state_fips}{county_fips}_{study_years}.csv')
     )
   }
 )
-
-tictoc::tic()
-cbp_data_09_10 <-
-  map(
-    cbp_api_09_10_calls[c(1:5)],
-    ~ .x %>%
-      req_perform()
-  )
 tictoc::toc()
 
-cbp_09_10_raw <-
-  map(
-    cbp_data_09_10,
-    ~ resp_body_json(.x, simplifyVector = TRUE) %>%
-      as.data.frame(stringsAsFactors = TRUE)
+
+## ---------------------------------------------------------------------------=
+# Addressing Texas Weirdness -----
+## ---------------------------------------------------------------------------=
+## Post processing, we're left with 13 problematic calls. Let's see why
+
+processed <-
+  list.files(
+    here('data')
   )
+
+st_co_yr <-
+  str_extract(processed, "\\d+_\\d{4}") %>%
+  as_tibble() %>%
+  rename(file_id = value)
+
+api_args_unprocessed <-
+  api_arguments %>%
+  mutate(file_id = glue('{state_fips}{county_fips}_{study_years}')) %>%
+  filter(!file_id %in% st_co_yr$file_id) %>%
+  select(-file_id)
+
+tx_annoyances <-
+  pmap(
+    api_args_unprocessed,
+    function(study_years, state_fips, county_fips, naics_era) {
+      cli::cli_alert(glue(
+        'Creating Query for {state_fips}{county_fips} in {study_years}'
+      ))
+
+      Sys.sleep(0.5)
+      api_query <-
+        create_cbp_requests(
+          naics_year = naics_era,
+          year = study_years,
+          state_fips = state_fips,
+          co_fips = county_fips
+        )
+    }
+  )
+
+## This url keeps census secrets
+help <-
+  glue("https://api.census.gov/data/2010/cbp")
+
+
+## Minimum number of variables that is common across 2010 - 2002
+cbp_common_vars <-
+  c(
+    "COUNTY",
+    "ST",
+    "GEO_TTL",
+    "YEAR",
+    "PAYANN",
+    "EMP",
+    "EMPSZES_TTL",
+    "ESTAB"
+  )
+
+## Coerce these variables to a string that API likes
+fields <-
+  paste(cbp_common_vars, collapse = ",")
+
+## Add flexible NAICS error term that changes depending on year of query call
+fields_fin <-
+  glue("{fields}")
+
+
+api_query <- request("https://api.census.gov/data/2003/cbp") %>%
+  req_url_query(
+    get = fields_fin,
+    `for` = "county:*",
+    `in` = "state:48",
+    key = my_census_key
+  ) %>%
+  req_throttle(rate = 5) %>% # optional throttling
+  req_retry(max_tries = 3, backoff = ~10) %>%
+  req_timeout(60)
+
+
+cbp_dat <-
+  api_query %>%
+  req_perform() %>%
+  resp_body_json(simplifyVector = TRUE) %>%
+  as.data.frame(stringsAsFactors = FALSE) %>%
+  janitor::row_to_names(row_number = 1)
+
+write_csv(api_args_unprocessed, 'tx_problem_obs.csv')
