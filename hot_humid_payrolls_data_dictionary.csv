@@ -1,0 +1,15 @@
+﻿variable_name,description
+county,county (2010) code
+st,state code
+geo_ttl,county (2010) name
+year,year
+payann,Annual payroll
+emp,"Total Number of Employees	"
+empszes_ttl,Title of Employment size of establishment
+estab,"Total number of Establishments	"
+state,state code
+naics,NAICS Industry Code
+naics_ttl,Title of NAICS code
+naics_yr,year of naics classifcation
+geoid10,2010 census geographic identifier
+pop_estimates,population estimates from intercensal census estimates
