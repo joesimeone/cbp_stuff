@@ -191,5 +191,5 @@ hot_humid_payrolls_fin <-
 
 write_csv(
   hot_humid_payrolls_fin,
-  here('fin_data', 'hot_humid_county_payrolls.csv')
+  here('fin_data', 'hot_dry_mixed_dry_county_payrolls.csv')
 )
